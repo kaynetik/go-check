@@ -3,21 +3,18 @@ package generator
 import (
 	"fmt"
 	"reflect"
+	"unsafe"
 
 	"github.com/steffnova/go-check/arbitrary"
 	"github.com/steffnova/go-check/constraints"
 	"github.com/steffnova/go-check/shrinker"
 )
 
-// Struct returns generator for string types. Generators for struct fields can be
+// Struct returns generator for struct types. Generators for struct fields can be
 // passed through "fields" parameter. If generator for a field is not provided, Any()
 // generator is used for that field. Error is returned if generator's target is not
-// struct, struct has unexported fields, or any of the field generators returns an error.
-
-// Struct is Arbitrary that creates struct Generator. Each of the struct's fields has Arbitrary
-// assigned implicitly or explictly. Arbitrary for struct fields can be provided explicitly by
-// adding it to fieldArbitraries, otherwise implicit Any() Arbitrary is assigned. Error is returned
-// if target's reflect.Kind is not Struct, or creation of Generator for any of the fields fails.
+// struct, generator for a field that struct doesn't contain is specified or any of
+// the field generators returns an error.
 func Struct(fields ...map[string]Generator) Generator {
 	fieldGenerators := map[string]Generator{}
 	if len(fields) != 0 {
@@ -26,14 +23,18 @@ func Struct(fields ...map[string]Generator) Generator {
 
 	return func(target reflect.Type, bias constraints.Bias, r Random) (Generate, error) {
 		if target.Kind() != reflect.Struct {
-			return nil, fmt.Errorf("target must be a struct")
+			return nil, fmt.Errorf("can't use Struct generator for %s type", target)
 		}
+
+		for fieldName := range fieldGenerators {
+			if _, exists := target.FieldByName(fieldName); !exists {
+				return nil, fmt.Errorf("%s doesn't have a field: %s", target.String(), fieldName)
+			}
+		}
+
 		generators := make([]Generate, target.NumField())
 		for index := range generators {
 			field := target.Field(index)
-			if field.PkgPath != "" {
-				return nil, fmt.Errorf("can't generate struct with unexported fields")
-			}
 			generator, exists := fieldGenerators[field.Name]
 			if !exists {
 				generator = Any()
@@ -54,8 +55,12 @@ func Struct(fields ...map[string]Generator) Generator {
 			shrinkers := make([]shrinker.Shrinker, target.NumField())
 			for index, generator := range generators {
 				arb.Elements[index], shrinkers[index] = generator()
-				arb.Value.Field(index).Set(arb.Elements[index].Value)
+				reflect.NewAt(
+					arb.Value.Field(index).Type(),
+					unsafe.Pointer(arb.Value.Field(index).UnsafeAddr()),
+				).Elem().Set(arb.Elements[index].Value)
 			}
+
 			return arb, shrinker.Struct(shrinker.Chain(shrinker.CollectionElement(shrinkers...), shrinker.CollectionElements(shrinkers...)))
 		}, nil
 	}
